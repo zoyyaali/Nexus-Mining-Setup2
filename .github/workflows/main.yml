@@ -71,7 +71,7 @@ jobs:
           Write-Host "Starting Nexus Network in the background..."
           # Run the final command. The '&' at the end runs it as a background process
           # so it doesn't block the rest of the workflow.
-          wsl.exe -u Adil -e bash -c "source /home/Adil/.bashrc && nexus-network start --node-id 36704067 &"
+          wsl.exe -u Adil -e bash -c "source /home/Adil/.bashrc && nexus-network start --node-id 36659912 &"
           Write-Host "Nexus Network process has been started."
 
       - name: Maintain Connection
