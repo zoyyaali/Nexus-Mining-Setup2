@@ -12,229 +12,165 @@ jobs:
       - name: Initial Setup
         id: setup
         run: |
-          # Create timestamp and directories
+          # Create timestamp for logging
           TIMESTAMP=$(date -u '+%Y%m%d_%H%M%S')
-          MINING_HOME="$HOME/mining_${TIMESTAMP}"
-          mkdir -p "$MINING_HOME"/{logs/{system,process,performance},scripts}
+          echo "timestamp=$TIMESTAMP" >> $GITHUB_ENV
           
-          # Export variables
-          {
-            echo "TIMESTAMP=$TIMESTAMP"
-            echo "MINING_HOME=$MINING_HOME"
-          } >> $GITHUB_ENV
+          # Create simple log file
+          LOG_FILE="nexus_mining_${{ github.run_id }}.log"
+          echo "log_file=$LOG_FILE" >> $GITHUB_ENV
           
-          # Save session info
-          cat << EOF > "$MINING_HOME/logs/session.json"
+          # Log initial information
           {
-            "workflow_id": "${{ github.run_id }}",
-            "repository": "${{ github.repository }}",
-            "user": "${{ github.actor }}",
-            "start_time": "$(date -u '+%Y-%m-%d %H:%M:%S')",
-            "runner": "${{ runner.os }}"
-          }
-          EOF
+            echo "=== Nexus Mining Workflow ==="
+            echo "Started at: $(date -u '+%Y-%m-%d %H:%M:%S')"
+            echo "Workflow ID: ${{ github.run_id }}"
+            echo "User: ${{ github.actor }}"
+            echo "Runner: ${{ runner.os }}"
+            echo "=========================="
+          } > "$HOME/$LOG_FILE"
         shell: bash
 
       - name: System Optimization
         id: optimize
         run: |
           {
-            echo "=== System Optimization Started: $(date -u) ==="
+            echo "=== System Optimization Started ==="
             
             # Stop non-essential services
             for service in snapd unattended-upgrades apache2 mysql docker; do
               sudo systemctl stop $service 2>/dev/null || true
             done
             
-            # CPU Optimization
+            # CPU Optimization if available
             if [ -d "/sys/devices/system/cpu/cpu0/cpufreq" ]; then
               for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
                 echo "performance" | sudo tee "$cpu" 2>/dev/null || true
               done
             fi
             
-            # System tuning
+            # Basic system tuning
             sudo sysctl -w vm.swappiness=10 2>/dev/null || true
             sudo sysctl -w vm.dirty_ratio=60 2>/dev/null || true
             
-            echo "=== System Optimization Completed: $(date -u) ==="
-          } 2>&1 | tee "$MINING_HOME/logs/system/optimization.log"
+            echo "System optimization completed at $(date -u)"
+          } >> "$HOME/${{ env.log_file }}"
         shell: bash
 
       - name: Install Dependencies
         id: dependencies
         run: |
           {
-            echo "=== Installing Dependencies: $(date -u) ==="
+            echo "=== Installing Dependencies ==="
             
-            # Update package lists with retry
-            for i in {1..3}; do
-              if sudo apt-get update; then
-                break
-              fi
-              sleep 5
-            done
+            # Update package lists
+            sudo apt-get update
             
             # Install required packages
-            PACKAGES=(expect curl htop sysstat numactl net-tools tree jq)
+            PACKAGES=(expect curl htop sysstat numactl net-tools)
             for pkg in "${PACKAGES[@]}"; do
               sudo apt-get install -y "$pkg" || echo "Failed to install $pkg"
             done
             
-            echo "=== Dependencies Installation Completed: $(date -u) ==="
-          } 2>&1 | tee "$MINING_HOME/logs/system/dependencies.log"
+            echo "Dependencies installed at $(date -u)"
+          } >> "$HOME/${{ env.log_file }}"
         shell: bash
 
-      - name: Setup Monitoring
-        id: monitoring
+      - name: Create Monitor Script
+        id: monitor
         run: |
           # Create monitoring script
-          cat << 'EOFMON' > "$MINING_HOME/scripts/monitor.sh"
+          cat << 'EOF' > "$HOME/monitor.sh"
           #!/bin/bash
-          
-          LOG_DIR="$1"
-          INTERVAL=60
+          LOG_FILE="$1"
           
           while true; do
-            TIMESTAMP=$(date -u '+%Y%m%d_%H%M%S')
-            
             {
-              echo "=== System Metrics at $(date -u) ==="
+              echo "=== System Status at $(date -u) ==="
               echo "--- CPU Usage ---"
-              top -bn1 | head -n 20
+              top -bn1 | head -n 10
               echo "--- Memory Usage ---"
               free -h
-              echo "--- Disk Usage ---"
-              df -h
-              echo "--- Process List ---"
-              ps aux --sort=-%cpu | head -n 10
-              echo "--- Node Status ---"
-              if pgrep -f nexus-network > /dev/null; then
-                ps aux | grep nexus-network
-              fi
-            } > "$LOG_DIR/performance/metrics_${TIMESTAMP}.log"
-            
-            sleep $INTERVAL
+              echo "--- Node Process ---"
+              ps aux | grep nexus-network
+              echo "===================="
+            } >> "$LOG_FILE"
+            sleep 300
           done
-          EOFMON
+          EOF
           
-          chmod +x "$MINING_HOME/scripts/monitor.sh"
+          chmod +x "$HOME/monitor.sh"
         shell: bash
 
       - name: Run Nexus Mining
         id: mining
         run: |
           {
-            echo "=== Starting Mining Operation: $(date -u) ==="
+            echo "=== Starting Mining Operation ==="
             
-            # Start monitoring in background
-            "$MINING_HOME/scripts/monitor.sh" "$MINING_HOME/logs" &
+            # Start monitoring
+            "$HOME/monitor.sh" "$HOME/${{ env.log_file }}" &
             MONITOR_PID=$!
             
             # Download Nexus CLI
-            MAX_RETRIES=5
-            for ((i=1; i<=MAX_RETRIES; i++)); do
-              echo "Downloading Nexus CLI (attempt $i/$MAX_RETRIES)..."
+            for i in {1..5}; do
+              echo "Downloading Nexus CLI (attempt $i)"
               if curl -sSL --retry 3 --retry-delay 10 https://cli.nexus.xyz/ | sh; then
                 break
               fi
-              if [ $i -eq $MAX_RETRIES ]; then
+              if [ $i -eq 5 ]; then
                 echo "Failed to download Nexus CLI"
                 exit 1
               fi
               sleep 10
             done
             
+            # Create expect script
+            cat << 'EOFEXP' > "$HOME/node.exp"
+            #!/usr/bin/expect
+            set timeout -1
+            spawn $env(HOME)/.nexus/bin/nexus-network start --node-id 36659912
+            expect {
+              "Do you agree to the Nexus Beta Terms of Use?" {
+                send "Y\r"
+                exp_continue
+              }
+              eof {
+                exit 1
+              }
+            }
+            interact
+            EOFEXP
+            
+            chmod +x "$HOME/node.exp"
+            
             # Run node with continuous session
             echo "Starting Nexus node..."
-            {
-              sudo numactl --physcpubind=0-3 --membind=0 expect -f- << 'EOF'
-              set timeout -1
-              log_file "$MINING_HOME/logs/process/node.log"
-              spawn $HOME/.nexus/bin/nexus-network start --node-id 36659912
-              expect {
-                "Do you agree to the Nexus Beta Terms of Use?" {
-                  send "Y\r"
-                  exp_continue
-                }
-                eof {
-                  exit 1
-                }
-              }
-              # Keep the session alive
-              interact
-              EOF
-            } &
+            sudo numactl --physcpubind=0-3 --membind=0 "$HOME/node.exp" &
             NODE_PID=$!
             
-            # Set process priority
+            # Set high priority
             sudo renice -n -20 -p $NODE_PID || true
             sudo chrt -f -p 99 $NODE_PID || true
             
-            # Wait for the duration (5h 55m to allow for cleanup)
+            # Wait for duration (5h 55m)
+            echo "Node started at $(date -u)"
             sleep 21300
             
             # Cleanup
+            echo "Stopping processes..."
             kill $MONITOR_PID || true
             kill $NODE_PID || true
             pkill -f nexus-network || true
             
-            echo "=== Mining Operation Completed: $(date -u) ==="
-          } 2>&1 | tee "$MINING_HOME/logs/process/mining.log"
+            echo "Mining operation completed at $(date -u)"
+          } >> "$HOME/${{ env.log_file }}"
         shell: bash
 
-      - name: Collect Logs
-        if: always()
-        id: collect_logs
-        run: |
-          {
-            echo "=== Collecting Logs: $(date -u) ==="
-            
-            # Clean up log filenames
-            find "$MINING_HOME" -type f -name "*" -exec bash -c '
-              for file; do
-                newname=$(echo "$file" | sed "s/[:><|*?\"\\]/_/g")
-                if [ "$file" != "$newname" ]; then
-                  mv "$file" "$newname"
-                fi
-              done
-            ' _ {} +
-            
-            # Create summary
-            cat << 'ENDSUM' > "$MINING_HOME/logs/summary.md"
-            # Mining Operation Summary
-            
-            ## Session Information
-            - Workflow ID: ${{ github.run_id }}
-            - Repository: ${{ github.repository }}
-            - User: ${{ github.actor }}
-            - Start Time: $(jq -r .start_time "$MINING_HOME/logs/session.json")
-            - End Time: $(date -u '+%Y-%m-%d %H:%M:%S')
-            
-            ## System Configuration
-            - Runner: ${{ runner.os }}
-            - CPU Mode: Performance
-            - Process Priority: -20
-            ENDSUM
-            
-            # Create archive
-            cd "$HOME"
-            ARCHIVE_NAME="mining_logs_${TIMESTAMP//[:><|*?\"\\]/_}.tar.gz"
-            
-            tar --transform 's/[:<>|*?"\\]/_/g' -czf "$ARCHIVE_NAME" "${MINING_HOME##*/}/" || {
-              echo "Creating empty archive as fallback..."
-              tar -czf "$ARCHIVE_NAME" -T /dev/null
-            }
-            
-            echo "=== Log Collection Completed: $(date -u) ==="
-          } 2>&1 | tee "$MINING_HOME/logs/system/collection.log"
-        shell: bash
-
-      - name: Upload Logs
+      - name: Upload Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mining-logs-${{ github.run_id }}
-          path: ${{ env.HOME }}/mining_logs_*.tar.gz
+          name: nexus-mining-log-${{ github.run_id }}
+          path: ~/nexus_mining_${{ github.run_id }}.log
           retention-days: 7
-          compression-level: 9
