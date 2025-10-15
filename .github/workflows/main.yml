@@ -1,41 +1,313 @@
-# ... previous steps remain the same ...
+name: Nexus Mining
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mining:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours maximum
+
+    steps:
+      - name: Initial Setup
+        id: setup
+        run: |
+          # Create timestamp
+          TIMESTAMP=$(date -u '+%Y%m%d_%H%M%S')
+          echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
+          
+          # Create base directory structure
+          MINING_HOME="$HOME/mining_operation"
+          mkdir -p "$MINING_HOME"/{logs,scripts,data,backup}
+          mkdir -p "$MINING_HOME/logs"/{system,process,errors,performance}
+          
+          # Export paths
+          echo "MINING_HOME=$MINING_HOME" >> $GITHUB_ENV
+          echo "LOG_PATH=$MINING_HOME/logs" >> $GITHUB_ENV
+          
+          # Save session info
+          cat << EOF > "$MINING_HOME/session_info.json"
+          {
+            "workflow_id": "${{ github.run_id }}",
+            "user": "${{ github.actor }}",
+            "start_time": "$(date -u '+%Y-%m-%d %H:%M:%S')",
+            "runner": "${{ runner.os }}-${{ runner.arch }}"
+          }
+          EOF
+        shell: bash
+
+      - name: System Optimization
+        id: optimize
+        run: |
+          {
+            echo "=== System Optimization Started ==="
+            date -u
+            
+            # Error handling function
+            handle_error() {
+              local error_code=$?
+              echo "Error occurred in ${BASH_SOURCE[1]} line ${BASH_LINENO[0]}: $1"
+              echo "Exit code: $error_code"
+              return $error_code
+            }
+            
+            # Stop unnecessary services
+            echo "Stopping non-essential services..."
+            SERVICES=(snapd unattended-upgrades apache2 mysql docker)
+            for service in "${SERVICES[@]}"; do
+              sudo systemctl stop $service 2>/dev/null || true
+            done
+            
+            # CPU Optimization
+            echo "Optimizing CPU settings..."
+            for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+              echo "performance" | sudo tee $cpu >/dev/null || handle_error "Failed to set CPU governor"
+            done
+            
+            # System tuning
+            echo "Tuning system parameters..."
+            sudo sysctl -w vm.swappiness=10
+            sudo sysctl -w kernel.sched_min_granularity_ns=10000000
+            sudo sysctl -w vm.dirty_ratio=60
+            
+            echo "=== System Optimization Completed ==="
+            date -u
+          } 2>&1 | tee "$LOG_PATH/system/optimization.log"
+        shell: bash
+
+      - name: Install Dependencies
+        id: dependencies
+        run: |
+          {
+            echo "=== Installing Dependencies ==="
+            date -u
+            
+            # Update package lists
+            sudo apt-get update || {
+              echo "Failed to update package lists"
+              exit 1
+            }
+            
+            # Install required packages
+            PACKAGES=(
+              expect
+              curl
+              htop
+              sysstat
+              numactl
+              net-tools
+              tree
+              jq
+              iotop
+              python3
+              python3-pip
+            )
+            
+            for package in "${PACKAGES[@]}"; do
+              echo "Installing $package..."
+              sudo apt-get install -y $package || {
+                echo "Failed to install $package"
+                exit 1
+              }
+            done
+            
+            echo "=== Dependencies Installation Completed ==="
+            date -u
+          } 2>&1 | tee "$LOG_PATH/system/dependencies.log"
+        shell: bash
+
+      - name: Create Monitoring Scripts
+        id: monitoring
+        run: |
+          # Create system monitoring script
+          cat << 'EOF' > "$MINING_HOME/scripts/monitor.sh"
+          #!/bin/bash
+          
+          LOG_DIR="$1"
+          INTERVAL=60  # seconds
+          
+          while true; do
+            TIMESTAMP=$(date -u '+%Y-%m-%d_%H:%M:%S')
+            
+            # System metrics
+            {
+              echo "=== System Metrics at $TIMESTAMP ==="
+              echo "--- CPU Usage ---"
+              top -bn1 | head -n 20
+              echo "--- Memory Usage ---"
+              free -h
+              echo "--- Disk Usage ---"
+              df -h
+              echo "--- Network Stats ---"
+              netstat -s | head -n 20
+            } > "$LOG_DIR/performance/metrics_${TIMESTAMP}.log"
+            
+            # Process monitoring
+            if pgrep -f nexus-network > /dev/null; then
+              {
+                echo "=== Process Stats at $TIMESTAMP ==="
+                ps aux | grep nexus-network
+                echo "--- Process Tree ---"
+                pstree -p $(pgrep -f nexus-network)
+              } > "$LOG_DIR/process/nexus_${TIMESTAMP}.log"
+            fi
+            
+            sleep $INTERVAL
+          done
+          EOF
+          
+          chmod +x "$MINING_HOME/scripts/monitor.sh"
+        shell: bash
+
+      - name: Run Nexus Mining Operation
+        id: mining
+        run: |
+          {
+            echo "=== Starting Mining Operation ==="
+            date -u
+            
+            # Start monitoring in background
+            "$MINING_HOME/scripts/monitor.sh" "$LOG_PATH" &
+            MONITOR_PID=$!
+            
+            # Download Nexus CLI with retry
+            MAX_RETRIES=5
+            RETRY_COUNT=0
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              if curl -sSL --retry 3 --retry-delay 10 https://cli.nexus.xyz/ | sh; then
+                break
+              fi
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              echo "Download attempt $RETRY_COUNT failed, retrying..."
+              sleep 10
+            done
+            
+            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+              echo "Failed to download Nexus CLI after $MAX_RETRIES attempts"
+              exit 1
+            fi
+            
+            # Setup Nexus environment
+            NEXUS_HOME="$HOME/.nexus"
+            BIN_DIR="$NEXUS_HOME/bin"
+            
+            # Function to start node
+            start_node() {
+              echo "Starting Nexus node..."
+              sudo numactl --physcpubind=0-3 --membind=0 expect -c "
+                log_user 1
+                spawn $BIN_DIR/nexus-network start --node-id 36659912
+                expect {
+                  \"Do you agree to the Nexus Beta Terms of Use?\" {
+                    send \"Y\r\"
+                    exp_continue
+                  }
+                  timeout {
+                    exit 1
+                  }
+                  eof {
+                    exit 0
+                  }
+                }
+              " 2>&1 | tee -a "$LOG_PATH/process/node.log" &
+              
+              echo $!
+            }
+            
+            # Start initial node
+            NODE_PID=$(start_node)
+            echo "Initial node started with PID: $NODE_PID"
+            
+            # Set process priority
+            sudo renice -n -20 -p $NODE_PID || true
+            sudo chrt -f -p 99 $NODE_PID || true
+            
+            # Monitor and maintain node
+            RESTART_COUNT=0
+            MAX_RESTARTS=5
+            END_TIME=$((SECONDS + 21300))  # 5 hours 55 minutes (leaving buffer)
+            
+            while [ $SECONDS -lt $END_TIME ]; do
+              if ! ps -p $NODE_PID > /dev/null 2>&1; then
+                echo "Node process died, attempting restart..."
+                RESTART_COUNT=$((RESTART_COUNT + 1))
+                
+                if [ $RESTART_COUNT -gt $MAX_RESTARTS ]; then
+                  echo "Too many restart attempts, exiting..."
+                  break
+                fi
+                
+                NODE_PID=$(start_node)
+                echo "Node restarted with PID: $NODE_PID"
+                sleep 60
+              fi
+              
+              # Log current status
+              echo "Status update: Runtime: ${SECONDS}s, Restarts: $RESTART_COUNT" >> "$LOG_PATH/process/status.log"
+              sleep 30
+            done
+            
+            # Cleanup
+            kill $MONITOR_PID || true
+            pkill -f nexus-network || true
+            
+            echo "=== Mining Operation Completed ==="
+            date -u
+          } 2>&1 | tee "$LOG_PATH/process/mining_operation.log"
+        shell: bash
 
       - name: Collect and Package Logs
         if: always()
+        id: collect_logs
         run: |
-          # Ensure we're in the right directory
-          cd $HOME
-          
-          # Verify log directory exists
-          if [ ! -d "mining_logs" ]; then
-            echo "Creating mining_logs directory"
-            mkdir -p mining_logs
-          fi
-          
-          # Create a basic log if none exists
-          if [ -z "$(ls -A mining_logs)" ]; then
-            echo "Creating basic log file"
-            echo "Workflow ID: ${{ github.run_id }}" > mining_logs/basic.log
-            echo "Timestamp: $(date -u)" >> mining_logs/basic.log
-          fi
-          
-          # Create tar file with explicit path
-          tar -czf mining_logs.tar.gz mining_logs/
-          
-          # Verify tar file was created
-          if [ -f mining_logs.tar.gz ]; then
-            echo "Log archive created successfully"
-            ls -lh mining_logs.tar.gz
-          else
-            echo "Failed to create log archive"
-            exit 1
-          fi
+          {
+            echo "=== Collecting Logs ==="
+            date -u
+            
+            # Ensure we're in the home directory
+            cd $HOME
+            
+            # Create summary report
+            cat << EOF > "$MINING_HOME/summary.md"
+            # Mining Operation Summary
+            
+            ## Session Information
+            - Workflow ID: ${{ github.run_id }}
+            - User: ${{ github.actor }}
+            - Start Time: $(jq -r .start_time "$MINING_HOME/session_info.json")
+            - End Time: $(date -u '+%Y-%m-%d %H:%M:%S')
+            
+            ## System Configuration
+            - Runner: ${{ runner.os }}-${{ runner.arch }}
+            - CPU Configuration: Performance mode
+            - Process Priority: -20 (highest)
+            
+            ## Directory Structure
+            \`\`\`
+            $(tree "$MINING_HOME")
+            \`\`\`
+            EOF
+            
+            # Create archive with explicit error handling
+            echo "Creating log archive..."
+            if tar -czf "mining_logs_${{ steps.setup.outputs.timestamp }}.tar.gz" -C "$HOME" "mining_operation/"; then
+              echo "Log archive created successfully"
+              ls -lh "mining_logs_${{ steps.setup.outputs.timestamp }}.tar.gz"
+            else
+              echo "Failed to create log archive"
+              exit 1
+            fi
+            
+            echo "=== Log Collection Completed ==="
+            date -u
+          } 2>&1 | tee "$LOG_PATH/system/log_collection.log"
+        shell: bash
 
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mining-logs-${{ github.run_id }}
-          path: ~/mining_logs.tar.gz  # Simplified path
+          name: mining-logs-${{ github.run_id }}-${{ steps.setup.outputs.timestamp }}
+          path: ~/mining_logs_${{ steps.setup.outputs.timestamp }}.tar.gz
           retention-days: 7
           compression-level: 9
