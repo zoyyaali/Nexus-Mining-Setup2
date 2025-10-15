@@ -6,256 +6,269 @@ on:
 jobs:
   mining:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # 6 hours
+    timeout-minutes: 360  # Fixed 6 hours maximum
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Environment and System Optimization
         run: |
-          # Create organized log directory structure
+          # Create organized log directory structure with timestamp
+          TIMESTAMP=$(date -u '+%Y%m%d_%H%M%S')
           WORKFLOW_ID="${{ github.run_id }}"
           WORKFLOW_NAME="${{ github.workflow }}"
           LOG_BASE="$HOME/mining_logs"
-          LOG_DIR="$LOG_BASE/${WORKFLOW_ID}_${WORKFLOW_NAME}"
-          mkdir -p "$LOG_DIR"/{system,node,metrics,performance}
+          LOG_DIR="$LOG_BASE/${TIMESTAMP}_${WORKFLOW_ID}"
           
-          # Save environment information
-          cat << EOF > "$LOG_DIR/environment_info.log"
-          Workflow Start Time (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')
-          Workflow ID: $WORKFLOW_ID
-          Workflow Name: $WORKFLOW_NAME
-          GitHub Actor: ${{ github.actor }}
-          Runner OS: $(uname -a)
+          # Create directory structure
+          mkdir -p "$LOG_DIR"/{system,node,metrics,performance,config}
+          
+          # Save runtime configuration
+          cat << EOF > "$LOG_DIR/config/runtime_info.json"
+          {
+            "workflow_id": "$WORKFLOW_ID",
+            "workflow_name": "$WORKFLOW_NAME",
+            "start_time": "$(date -u '+%Y-%m-%d %H:%M:%S')",
+            "github_actor": "${{ github.actor }}",
+            "duration_hours": "6",
+            "runner_os": "$(uname -a)",
+            "runner_version": "${{ runner.os }}-${{ runner.arch }}"
+          }
           EOF
           
-          # CPU Optimization
-          echo "=== CPU Configuration ===" | tee -a "$LOG_DIR/system/cpu_config.log"
-          
-          # Set CPU governor to performance mode
-          for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-            echo "performance" | sudo tee $cpu
-            echo "Set $cpu to performance" >> "$LOG_DIR/system/cpu_config.log"
-          done
-          
-          # Disable CPU throttling
-          echo "1" | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
-          
-          # Configure CPU priorities
-          sudo sysctl -w kernel.sched_min_granularity_ns=10000000
-          sudo sysctl -w kernel.sched_wakeup_granularity_ns=15000000
-          sudo sysctl -w vm.swappiness=10
-          
-          # Optimize memory management
-          sudo sysctl -w vm.dirty_ratio=60
-          sudo sysctl -w vm.dirty_background_ratio=30
-          
-          # Stop unnecessary services
-          SERVICES_TO_STOP="snapd unattended-upgrades apache2 mysql"
-          for service in $SERVICES_TO_STOP; do
-            sudo systemctl stop $service 2>/dev/null || true
-            echo "Stopped $service" >> "$LOG_DIR/system/services.log"
-          done
-          
-          # Record system information
+          # System Optimization
           {
-            echo "=== CPU Information ==="
-            lscpu
-            echo -e "\n=== Memory Information ==="
-            free -h
-            echo -e "\n=== Disk Information ==="
-            df -h
-            echo -e "\n=== System Load ==="
-            uptime
-            echo -e "\n=== CPU Scaling Settings ==="
-            cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq
-          } > "$LOG_DIR/system/hardware_info.log"
+            echo "=== System Optimization Start: $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+            
+            # CPU Configuration
+            echo "Setting CPU governor to performance mode..."
+            for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+              echo "performance" | sudo tee $cpu
+            done
+            
+            # Disable CPU throttling
+            echo "Configuring CPU throttling..."
+            echo "1" | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo || true
+            
+            # System tuning
+            echo "Configuring system parameters..."
+            sudo sysctl -w kernel.sched_min_granularity_ns=10000000
+            sudo sysctl -w kernel.sched_wakeup_granularity_ns=15000000
+            sudo sysctl -w vm.swappiness=10
+            sudo sysctl -w vm.dirty_ratio=60
+            sudo sysctl -w vm.dirty_background_ratio=30
+            
+            # Stop unnecessary services
+            echo "Stopping unnecessary services..."
+            for service in snapd unattended-upgrades apache2 mysql docker; do
+              sudo systemctl stop $service 2>/dev/null || true
+            done
+            
+            echo "=== System Optimization Complete: $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+          } 2>&1 | tee "$LOG_DIR/system/optimization.log"
           
-          # Export log directory for other steps
+          # Export variables for other steps
           echo "LOG_DIR=$LOG_DIR" >> $GITHUB_ENV
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
         shell: bash
 
-      - name: Install Dependencies and Tools
+      - name: Install Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            expect \
-            curl \
-            htop \
-            sysstat \
-            linux-tools-common \
-            linux-tools-generic \
-            numactl \
-            cpufrequtils
-          
-          echo "Dependencies installed at $(date -u '+%Y-%m-%d %H:%M:%S')" >> "$LOG_DIR/system/installation.log"
+          {
+            echo "=== Installing Dependencies: $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+            
+            # Update package list
+            sudo apt-get update
+            
+            # Install required packages
+            sudo apt-get install -y \
+              expect \
+              curl \
+              htop \
+              sysstat \
+              linux-tools-common \
+              linux-tools-generic \
+              numactl \
+              cpufrequtils \
+              iotop \
+              net-tools \
+              tree
+            
+            echo "=== Dependencies Installation Complete: $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+          } 2>&1 | tee "$LOG_DIR/system/dependencies.log"
 
-      - name: Run Nexus Mining CLI with Advanced Monitoring
+      - name: Setup Monitoring Scripts
         run: |
-          # Source helper functions
-          cat << 'EOF' > "$LOG_DIR/mining_functions.sh"
-          log_message() {
-            local level="$1"
-            local message="$2"
-            local log_file="$3"
-            echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] [$level] $message" | tee -a "$log_file"
-          }
+          # Create monitoring script
+          cat << 'EOF' > "$LOG_DIR/scripts/monitor.sh"
+          #!/bin/bash
           
-          collect_performance_metrics() {
-            while true; do
-              local metrics_file="$1"
-              local timestamp=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          LOG_DIR="$1"
+          
+          while true; do
+            TIMESTAMP=$(date -u '+%Y-%m-%d_%H:%M:%S')
+            
+            # System metrics
+            {
+              echo "=== System Metrics at $TIMESTAMP ==="
+              echo "--- CPU Usage ---"
+              mpstat 1 1
+              echo "--- Memory Usage ---"
+              free -h
+              echo "--- Disk I/O ---"
+              iostat -x 1 1
+              echo "--- Network Stats ---"
+              netstat -s
+              echo "--- Process List ---"
+              ps aux --sort=-%cpu | head -n 15
+            } >> "$LOG_DIR/performance/system_metrics_${TIMESTAMP}.log"
+            
+            # Node specific metrics
+            if pgrep -f nexus-network > /dev/null; then
               {
-                echo "=== $timestamp ==="
-                echo "--- CPU Usage ---"
-                mpstat 1 1
-                echo "--- Memory Usage ---"
-                free -h
-                echo "--- Top Processes ---"
-                ps aux --sort=-%cpu | head -n 10
-                echo "--- CPU Frequencies ---"
-                cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq
-                echo "--- System Load ---"
-                cat /proc/loadavg
-              } >> "$metrics_file"
-              sleep 60
-            done
-          }
-          EOF
-          
-          source "$LOG_DIR/mining_functions.sh"
-          
-          # Start performance monitoring
-          collect_performance_metrics "$LOG_DIR/performance/metrics.log" &
-          METRICS_PID=$!
-          
-          # Download and setup Nexus CLI
-          log_message "INFO" "Downloading Nexus CLI..." "$LOG_DIR/node/setup.log"
-          curl -sSL --retry 3 --retry-delay 10 https://cli.nexus.xyz/ | sh
-          
-          NEXUS_HOME="$HOME/.nexus"
-          BIN_DIR="$NEXUS_HOME/bin"
-          
-          # Run node with CPU affinity and priority
-          start_node() {
-            log_message "INFO" "Starting Nexus node with optimized CPU settings..." "$LOG_DIR/node/runtime.log"
-            
-            # Use numactl to bind to specific CPU cores and memory nodes
-            sudo numactl --physcpubind=0-3 --membind=0 expect -c "
-              log_user 1
-              spawn $BIN_DIR/nexus-network start --node-id 36659912
-              expect {
-                \"Do you agree to the Nexus Beta Terms of Use?\" {
-                  send \"Y\r\"
-                  exp_continue
-                }
-                timeout {
-                  exit 1
-                }
-                eof {
-                  exit 0
-                }
-              }
-              " 2>&1 | tee -a "$LOG_DIR/node/process.log" &
-            
-            echo $!
-          }
-          
-          # Start node with monitoring
-          NODE_PID=$(start_node)
-          log_message "INFO" "Node started with PID: $NODE_PID" "$LOG_DIR/node/runtime.log"
-          
-          # Set high priority for the node process
-          sudo renice -n -20 -p $NODE_PID
-          sudo chrt -f -p 99 $NODE_PID
-          
-          # Monitor and maintain node
-          RESTART_COUNT=0
-          MAX_RESTARTS=5
-          start_time=$SECONDS
-          end_time=$((SECONDS + 21600)) # 6 hours
-          
-          while [ $SECONDS -lt $end_time ]; do
-            # Check node health
-            if ! ps -p $NODE_PID > /dev/null 2>&1; then
-              log_message "WARNING" "Node process died. Attempting restart..." "$LOG_DIR/node/runtime.log"
-              RESTART_COUNT=$((RESTART_COUNT + 1))
-              
-              if [ $RESTART_COUNT -gt $MAX_RESTARTS ]; then
-                log_message "ERROR" "Too many restart attempts. Exiting..." "$LOG_DIR/node/runtime.log"
-                break
-              fi
-              
-              NODE_PID=$(start_node)
-              log_message "INFO" "Node restarted with new PID: $NODE_PID" "$LOG_DIR/node/runtime.log"
-              sleep 60
+                echo "=== Node Metrics at $TIMESTAMP ==="
+                echo "--- Node Process Info ---"
+                ps -p $(pgrep -f nexus-network) -o pid,ppid,cmd,%cpu,%mem,start,etime
+                echo "--- Node File Descriptors ---"
+                ls -l /proc/$(pgrep -f nexus-network)/fd
+              } >> "$LOG_DIR/node/process_metrics_${TIMESTAMP}.log"
             fi
             
-            # Log runtime statistics
-            current_runtime=$((SECONDS - start_time))
-            log_message "INFO" "Runtime: ${current_runtime}s, Restarts: $RESTART_COUNT" "$LOG_DIR/node/runtime.log"
-            
-            # Copy recent node logs
-            tail -n 100 "$NEXUS_HOME/nexus-node.log" > "$LOG_DIR/node/recent_activity.log"
-            
-            sleep 30
+            sleep 60
           done
-          
-          # Stop metrics collection
-          kill $METRICS_PID
-        shell: bash
-
-      - name: Cleanup and Log Collection
-        if: always()
-        run: |
-          # Capture final system state
-          {
-            echo "=== Final System State at $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
-            echo "--- CPU Usage ---"
-            mpstat 1 1
-            echo "--- Memory Usage ---"
-            free -h
-            echo "--- Disk Usage ---"
-            df -h
-            echo "--- Process Tree ---"
-            pstree -p
-          } > "$LOG_DIR/system/final_state.log"
-          
-          # Stop node gracefully
-          pkill -f nexus-network
-          
-          # Create summary report
-          cat << EOF > "$LOG_DIR/summary.md"
-          # Mining Operation Summary
-          
-          - **Workflow ID**: ${{ github.run_id }}
-          - **Workflow Name**: ${{ github.workflow }}
-          - **Start Time**: $(cat "$LOG_DIR/environment_info.log" | grep "Workflow Start Time" | cut -d: -f2-)
-          - **End Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          - **Actor**: ${{ github.actor }}
-          
-          ## System Performance
-          - CPU Configuration: Performance mode enabled
-          - Memory Optimization: Swappiness set to 10
-          - Process Priority: -20 (highest)
-          
-          ## Log Files
-          - System metrics: \`system/\`
-          - Node operation: \`node/\`
-          - Performance data: \`performance/\`
-          
           EOF
           
-          # Compress logs with workflow ID
-          cd $HOME
-          tar -czf "mining_logs_${{ github.run_id }}.tar.gz" mining_logs/
+          chmod +x "$LOG_DIR/scripts/monitor.sh"
+
+      - name: Run Nexus Mining CLI
+        run: |
+          # Start monitoring
+          "$LOG_DIR/scripts/monitor.sh" "$LOG_DIR" &
+          MONITOR_PID=$!
           
-          echo "Cleanup completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          # Download and setup Nexus CLI
+          {
+            echo "=== Starting Nexus CLI Setup: $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+            curl -sSL --retry 5 --retry-delay 10 https://cli.nexus.xyz/ | sh
+            
+            NEXUS_HOME="$HOME/.nexus"
+            BIN_DIR="$NEXUS_HOME/bin"
+            
+            # Function to start node with optimizations
+            start_node() {
+              echo "Starting node with optimizations..."
+              sudo numactl --physcpubind=0-3 --membind=0 expect -c "
+                log_user 1
+                spawn $BIN_DIR/nexus-network start --node-id 36659912
+                expect {
+                  \"Do you agree to the Nexus Beta Terms of Use?\" {
+                    send \"Y\r\"
+                    exp_continue
+                  }
+                  timeout {
+                    exit 1
+                  }
+                  eof {
+                    exit 0
+                  }
+                }
+              " 2>&1 | tee -a "$LOG_DIR/node/node.log" &
+              
+              echo $!
+            }
+            
+            # Start node
+            NODE_PID=$(start_node)
+            echo "Node started with PID: $NODE_PID"
+            
+            # Optimize node process
+            sudo renice -n -20 -p $NODE_PID
+            sudo chrt -f -p 99 $NODE_PID
+            
+            # Monitor node for 6 hours
+            END_TIME=$((SECONDS + 21600)) # 6 hours in seconds
+            RESTART_COUNT=0
+            MAX_RESTARTS=5
+            
+            while [ $SECONDS -lt $END_TIME ]; do
+              if ! ps -p $NODE_PID > /dev/null 2>&1; then
+                echo "Node process died, attempting restart..."
+                RESTART_COUNT=$((RESTART_COUNT + 1))
+                
+                if [ $RESTART_COUNT -gt $MAX_RESTARTS ]; then
+                  echo "Too many restart attempts, exiting..."
+                  break
+                fi
+                
+                NODE_PID=$(start_node)
+                echo "Node restarted with PID: $NODE_PID"
+                sleep 60
+              fi
+              
+              sleep 30
+            done
+            
+          } 2>&1 | tee "$LOG_DIR/node/operation.log"
+          
+          # Stop monitoring
+          kill $MONITOR_PID || true
+
+      - name: Collect and Package Logs
+        if: always()
+        run: |
+          {
+            echo "=== Collecting Final System State: $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+            
+            # System summary
+            {
+              echo "--- Final CPU State ---"
+              lscpu
+              echo "--- Final Memory State ---"
+              free -h
+              echo "--- Final Disk State ---"
+              df -h
+              echo "--- Final Process Tree ---"
+              pstree -p
+              echo "--- System Uptime ---"
+              uptime
+            } > "$LOG_DIR/system/final_state.log"
+            
+            # Create summary report
+            cat << EOF > "$LOG_DIR/summary.md"
+            # Mining Operation Summary
+            
+            ## Runtime Information
+            - **Workflow ID**: ${{ github.run_id }}
+            - **Start Time**: $(cat "$LOG_DIR/config/runtime_info.json" | jq -r .start_time)
+            - **End Time**: $(date -u '+%Y-%m-%d %H:%M:%S')
+            - **Duration**: 6 hours
+            - **Actor**: ${{ github.actor }}
+            
+            ## System Configuration
+            - Runner: ${{ runner.os }}-${{ runner.arch }}
+            - CPU Optimization: Enabled
+            - Process Priority: -20 (highest)
+            
+            ## Log Structure
+            \`\`\`
+            $(tree "$LOG_DIR")
+            \`\`\`
+            
+            EOF
+            
+            # Compress logs
+            cd $HOME
+            tar -czf "mining_logs_$TIMESTAMP.tar.gz" mining_logs/
+            
+            echo "=== Log Collection Complete: $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+          } 2>&1 | tee "$LOG_DIR/system/final_collection.log"
 
       - name: Upload Logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: mining-logs-${{ github.run_id }}
-          path: ~/mining_logs_${{ github.run_id }}.tar.gz
+          name: mining-logs-${{ github.run_id }}-${{ env.TIMESTAMP }}
+          path: ~/mining_logs_${{ env.TIMESTAMP }}.tar.gz
           retention-days: 7
+          compression-level: 9
