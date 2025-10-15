@@ -6,54 +6,64 @@ on:
 jobs:
   mining:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours maximum
+    timeout-minutes: 360
 
     steps:
       - name: Initial Setup
         id: setup
         run: |
-          # Create timestamp for logging
+          # Create timestamp and set log file
           TIMESTAMP=$(date -u '+%Y%m%d_%H%M%S')
-          echo "timestamp=$TIMESTAMP" >> $GITHUB_ENV
-          
-          # Create simple log file
           LOG_FILE="nexus_mining_${{ github.run_id }}.log"
-          echo "log_file=$LOG_FILE" >> $GITHUB_ENV
           
-          # Log initial information
+          # Export variables
+          {
+            echo "timestamp=$TIMESTAMP"
+            echo "log_file=$LOG_FILE"
+          } >> $GITHUB_ENV
+          
+          # Initialize log file
           {
             echo "=== Nexus Mining Workflow ==="
-            echo "Started at: $(date -u '+%Y-%m-%d %H:%M:%S')"
+            echo "Started: $(date -u '+%Y-%m-%d %H:%M:%S')"
             echo "Workflow ID: ${{ github.run_id }}"
             echo "User: ${{ github.actor }}"
             echo "Runner: ${{ runner.os }}"
             echo "=========================="
           } > "$HOME/$LOG_FILE"
+          
+          # Ensure file exists
+          if [ ! -f "$HOME/$LOG_FILE" ]; then
+            echo "Failed to create log file"
+            exit 1
+          fi
         shell: bash
 
       - name: System Optimization
         id: optimize
         run: |
           {
-            echo "=== System Optimization Started ==="
+            echo "=== System Optimization: $(date -u) ==="
             
-            # Stop non-essential services
+            # Stop services
             for service in snapd unattended-upgrades apache2 mysql docker; do
               sudo systemctl stop $service 2>/dev/null || true
+              echo "Stopped $service"
             done
             
-            # CPU Optimization if available
+            # CPU Optimization
             if [ -d "/sys/devices/system/cpu/cpu0/cpufreq" ]; then
               for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
                 echo "performance" | sudo tee "$cpu" 2>/dev/null || true
               done
+              echo "CPU set to performance mode"
             fi
             
-            # Basic system tuning
+            # System tuning
             sudo sysctl -w vm.swappiness=10 2>/dev/null || true
             sudo sysctl -w vm.dirty_ratio=60 2>/dev/null || true
             
-            echo "System optimization completed at $(date -u)"
+            echo "=== Optimization Complete: $(date -u) ==="
           } >> "$HOME/${{ env.log_file }}"
         shell: bash
 
@@ -61,43 +71,47 @@ jobs:
         id: dependencies
         run: |
           {
-            echo "=== Installing Dependencies ==="
+            echo "=== Installing Dependencies: $(date -u) ==="
             
-            # Update package lists
+            # Update and install
             sudo apt-get update
-            
-            # Install required packages
             PACKAGES=(expect curl htop sysstat numactl net-tools)
+            
             for pkg in "${PACKAGES[@]}"; do
-              sudo apt-get install -y "$pkg" || echo "Failed to install $pkg"
+              if sudo apt-get install -y "$pkg"; then
+                echo "Installed $pkg"
+              else
+                echo "Failed to install $pkg"
+              fi
             done
             
-            echo "Dependencies installed at $(date -u)"
+            echo "=== Dependencies Complete: $(date -u) ==="
           } >> "$HOME/${{ env.log_file }}"
         shell: bash
 
-      - name: Create Monitor Script
+      - name: Setup Monitor
         id: monitor
         run: |
-          # Create monitoring script
-          cat << 'EOF' > "$HOME/monitor.sh"
-          #!/bin/bash
-          LOG_FILE="$1"
-          
-          while true; do
-            {
-              echo "=== System Status at $(date -u) ==="
-              echo "--- CPU Usage ---"
-              top -bn1 | head -n 10
-              echo "--- Memory Usage ---"
-              free -h
-              echo "--- Node Process ---"
-              ps aux | grep nexus-network
-              echo "===================="
-            } >> "$LOG_FILE"
-            sleep 300
-          done
-          EOF
+          # Create monitor script
+          cat > "$HOME/monitor.sh" << 'EOF'
+#!/bin/bash
+LOG_FILE="$1"
+INTERVAL=300
+
+while true; do
+  {
+    echo "=== System Status: $(date -u) ==="
+    echo "--- CPU Usage ---"
+    top -bn1 | head -n 10
+    echo "--- Memory Usage ---"
+    free -h
+    echo "--- Node Status ---"
+    ps aux | grep nexus-network
+    echo "=================="
+  } >> "$LOG_FILE"
+  sleep $INTERVAL
+done
+EOF
           
           chmod +x "$HOME/monitor.sh"
         shell: bash
@@ -106,55 +120,59 @@ jobs:
         id: mining
         run: |
           {
-            echo "=== Starting Mining Operation ==="
+            echo "=== Starting Mining: $(date -u) ==="
             
             # Start monitoring
             "$HOME/monitor.sh" "$HOME/${{ env.log_file }}" &
             MONITOR_PID=$!
             
-            # Download Nexus CLI
+            # Download CLI
             for i in {1..5}; do
-              echo "Downloading Nexus CLI (attempt $i)"
+              echo "Downloading Nexus CLI (attempt $i/5)"
               if curl -sSL --retry 3 --retry-delay 10 https://cli.nexus.xyz/ | sh; then
+                echo "Download successful"
                 break
               fi
               if [ $i -eq 5 ]; then
-                echo "Failed to download Nexus CLI"
+                echo "Download failed"
                 exit 1
               fi
               sleep 10
             done
             
             # Create expect script
-            cat << 'EOFEXP' > "$HOME/node.exp"
-            #!/usr/bin/expect
-            set timeout -1
-            spawn $env(HOME)/.nexus/bin/nexus-network start --node-id 36659912
-            expect {
-              "Do you agree to the Nexus Beta Terms of Use?" {
-                send "Y\r"
-                exp_continue
-              }
-              eof {
-                exit 1
-              }
-            }
-            interact
-            EOFEXP
+            cat > "$HOME/node.exp" << 'EOFEXP'
+#!/usr/bin/expect
+set timeout -1
+log_user 1
+spawn $env(HOME)/.nexus/bin/nexus-network start --node-id 36659912
+expect {
+  "Do you agree to the Nexus Beta Terms of Use?" {
+    send "Y\r"
+    exp_continue
+  }
+  eof {
+    exit 1
+  }
+}
+interact
+EOFEXP
             
             chmod +x "$HOME/node.exp"
             
-            # Run node with continuous session
-            echo "Starting Nexus node..."
+            # Run node
+            echo "Starting node..."
             sudo numactl --physcpubind=0-3 --membind=0 "$HOME/node.exp" &
             NODE_PID=$!
             
-            # Set high priority
+            # Optimize process
             sudo renice -n -20 -p $NODE_PID || true
             sudo chrt -f -p 99 $NODE_PID || true
             
-            # Wait for duration (5h 55m)
-            echo "Node started at $(date -u)"
+            echo "Node started with PID: $NODE_PID"
+            
+            # Run for duration
+            echo "Running for 5h 55m..."
             sleep 21300
             
             # Cleanup
@@ -163,7 +181,7 @@ jobs:
             kill $NODE_PID || true
             pkill -f nexus-network || true
             
-            echo "Mining operation completed at $(date -u)"
+            echo "=== Mining Complete: $(date -u) ==="
           } >> "$HOME/${{ env.log_file }}"
         shell: bash
 
