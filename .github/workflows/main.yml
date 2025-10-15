@@ -140,16 +140,18 @@ jobs:
               exp_continue
             }
             eof {
-              exit 1
+              # This will keep the script alive until the node process is killed.
+              # A non-zero exit here would cause the workflow to fail prematurely.
+              exit 0
             }
           }
-          interact
           EOFEXP
             
             chmod +x "$HOME/node.exp"
             
             echo "Starting node..."
-            sudo numactl --physcpubind=0-3 --membind=0 "$HOME/node.exp" &
+            # Use "sudo -E" to preserve the user's environment variables (like HOME)
+            sudo -E numactl --physcpubind=0-3 --membind=0 "$HOME/node.exp" &
             NODE_PID=$!
             
             sudo renice -n -20 -p $NODE_PID || true
