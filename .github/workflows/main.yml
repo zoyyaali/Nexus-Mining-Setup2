@@ -1,108 +1,52 @@
-name: RDP with Nexus Setup
+name: Nexus Mining
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 3600
-
+  mining:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # 6 hours
     steps:
-      - name: Configure Core RDP Settings
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall firewall add rule name="Allow RDP" dir=in action=allow protocol=TCP localport=3389
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      # --- THIS STEP IS FIXED ---
-      - name: Create RDP User with Secure Password
+      - name: Install dependencies
         run: |
-          # Define character sets for password complexity
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = '!', '@', '#', '$', '%', '^', '&', '*'
-          }
-          # Build a password that guarantees complexity
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 2
-          
-          # Shuffle the characters to make the password random and join them into a string
-          $password = -join ($rawPassword | Get-Random -Count $rawPassword.Length)
-          
-          # Create the user with the new secure password
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          sudo apt-get update
+          sudo apt-get install -y expect curl
 
-          # Save the generated password to an environment variable for the final step
-          echo "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Install Tailscale
+      - name: Run Nexus Mining CLI
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          set +e
+          echo "Downloading Nexus CLI..."
+          curl -sSL --retry 3 --retry-delay 10 https://cli.nexus.xyz/ | sh
+          sleep 30 # wait for the CLI to install
+          echo "Nexus CLI downloaded successfully!"
+          NEXUS_HOME="$HOME/.nexus"
+          BIN_DIR="$NEXUS_HOME/bin"
+          echo "Starting Nexus node..."
+          expect -c "spawn $BIN_DIR/nexus-network start --node-id 798900; expect { \"Do you agree to the Nexus Beta Terms of Use?\" { send \"Y\r\"; exp_continue } eof { exit 0 } };"
+          echo "Nexus node started successfully!"
+        continue-on-error: true
+        shell: bash
 
-      - name: Establish Tailscale Connection
+      - name: Keep mining for 6 hours
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-            Start-Sleep -Seconds 5
-            $retries++
-          }
-          if (-not $tsIP) {
-            Write-Error "Tailscale IP not assigned. Exiting."
-            exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          sleep 6h
+          echo "6 hours have passed, stopping Nexus node..."
+        shell: bash
 
-      - name: Setup and Run Nexus Network
+      - name: Cleanup
         run: |
-          Write-Host "Installing Windows Subsystem for Linux (WSL)..."
-          wsl --install --distribution Ubuntu
-          
-          Write-Host "Creating WSL user 'Adil' and setting password..."
-          # A short delay to ensure the WSL distro is fully initialized after installation
-          Start-Sleep -Seconds 20
-          
-          # Create user 'Adil' and add to sudo group without a password prompt
-          wsl.exe --user root useradd -m -G sudo -s /bin/bash Adil
-          
-          # Set the password non-interactively using chpasswd
-          wsl.exe --user root bash -c "echo 'Adil:149120' | chpasswd"
-          
-          Write-Host "Installing Nexus CLI for user 'Adil'..."
-          # The 'yes' command pipes 'y' to the script to automatically accept the terms
-          wsl.exe -u Adil -e bash -c "yes | curl https://cli.xyz/ | sh"
-          
-          Write-Host "Starting Nexus Network in the background..."
-          # Run the final command. The '&' at the end runs it as a background process
-          # so it doesn't block the rest of the workflow.
-          wsl.exe -u Adil -e bash -c "source /home/Adil/.bashrc && nexus-network start --node-id 36704067 &"
-          Write-Host "Nexus Network process has been started."
+          pkill -f nexus-network
+          echo "Nexus node stopped successfully!"
+        continue-on-error: true
+        shell: bash
 
-      - name: Maintain Connection
+      - name: Logs
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "==================`n"
-          
-          # Keep runner active until manually cancelled
-          while ($true) {
-            Write-Host "[$(Get-Date)] RDP Active. Workflow will continue running."
-            Start-Sleep -Seconds 300
-          }
+          echo "Displaying Nexus node logs..."
+          cat ~/.nexus/nexus-node.log
+        continue-on-error: true
+        shell: bash
