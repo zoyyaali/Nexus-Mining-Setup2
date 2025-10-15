@@ -12,17 +12,14 @@ jobs:
       - name: Initial Setup
         id: setup
         run: |
-          # Create timestamp and set log file
           TIMESTAMP=$(date -u '+%Y%m%d_%H%M%S')
           LOG_FILE="nexus_mining_${{ github.run_id }}.log"
           
-          # Export variables
           {
             echo "timestamp=$TIMESTAMP"
             echo "log_file=$LOG_FILE"
           } >> $GITHUB_ENV
           
-          # Initialize log file
           {
             echo "=== Nexus Mining Workflow ==="
             echo "Started: $(date -u '+%Y-%m-%d %H:%M:%S')"
@@ -32,7 +29,6 @@ jobs:
             echo "=========================="
           } > "$HOME/$LOG_FILE"
           
-          # Ensure file exists
           if [ ! -f "$HOME/$LOG_FILE" ]; then
             echo "Failed to create log file"
             exit 1
@@ -45,13 +41,11 @@ jobs:
           {
             echo "=== System Optimization: $(date -u) ==="
             
-            # Stop services
             for service in snapd unattended-upgrades apache2 mysql docker; do
               sudo systemctl stop $service 2>/dev/null || true
               echo "Stopped $service"
             done
             
-            # CPU Optimization
             if [ -d "/sys/devices/system/cpu/cpu0/cpufreq" ]; then
               for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
                 echo "performance" | sudo tee "$cpu" 2>/dev/null || true
@@ -59,7 +53,6 @@ jobs:
               echo "CPU set to performance mode"
             fi
             
-            # System tuning
             sudo sysctl -w vm.swappiness=10 2>/dev/null || true
             sudo sysctl -w vm.dirty_ratio=60 2>/dev/null || true
             
@@ -73,7 +66,6 @@ jobs:
           {
             echo "=== Installing Dependencies: $(date -u) ==="
             
-            # Update and install
             sudo apt-get update
             PACKAGES=(expect curl htop sysstat numactl net-tools)
             
@@ -92,26 +84,25 @@ jobs:
       - name: Setup Monitor
         id: monitor
         run: |
-          # Create monitor script
           cat > "$HOME/monitor.sh" << 'EOF'
-#!/bin/bash
-LOG_FILE="$1"
-INTERVAL=300
+          #!/bin/bash
+          LOG_FILE="$1"
+          INTERVAL=300
 
-while true; do
-  {
-    echo "=== System Status: $(date -u) ==="
-    echo "--- CPU Usage ---"
-    top -bn1 | head -n 10
-    echo "--- Memory Usage ---"
-    free -h
-    echo "--- Node Status ---"
-    ps aux | grep nexus-network
-    echo "=================="
-  } >> "$LOG_FILE"
-  sleep $INTERVAL
-done
-EOF
+          while true; do
+            {
+              echo "=== System Status: $(date -u) ==="
+              echo "--- CPU Usage ---"
+              top -bn1 | head -n 10
+              echo "--- Memory Usage ---"
+              free -h
+              echo "--- Node Status ---"
+              ps aux | grep nexus-network
+              echo "=================="
+            } >> "$LOG_FILE"
+            sleep $INTERVAL
+          done
+          EOF
           
           chmod +x "$HOME/monitor.sh"
         shell: bash
@@ -122,11 +113,9 @@ EOF
           {
             echo "=== Starting Mining: $(date -u) ==="
             
-            # Start monitoring
             "$HOME/monitor.sh" "$HOME/${{ env.log_file }}" &
             MONITOR_PID=$!
             
-            # Download CLI
             for i in {1..5}; do
               echo "Downloading Nexus CLI (attempt $i/5)"
               if curl -sSL --retry 3 --retry-delay 10 https://cli.nexus.xyz/ | sh; then
@@ -140,42 +129,37 @@ EOF
               sleep 10
             done
             
-            # Create expect script
             cat > "$HOME/node.exp" << 'EOFEXP'
-#!/usr/bin/expect
-set timeout -1
-log_user 1
-spawn $env(HOME)/.nexus/bin/nexus-network start --node-id 36659912
-expect {
-  "Do you agree to the Nexus Beta Terms of Use?" {
-    send "Y\r"
-    exp_continue
-  }
-  eof {
-    exit 1
-  }
-}
-interact
-EOFEXP
+          #!/usr/bin/expect
+          set timeout -1
+          log_user 1
+          spawn $env(HOME)/.nexus/bin/nexus-network start --node-id 36659912
+          expect {
+            "Do you agree to the Nexus Beta Terms of Use?" {
+              send "Y\r"
+              exp_continue
+            }
+            eof {
+              exit 1
+            }
+          }
+          interact
+          EOFEXP
             
             chmod +x "$HOME/node.exp"
             
-            # Run node
             echo "Starting node..."
             sudo numactl --physcpubind=0-3 --membind=0 "$HOME/node.exp" &
             NODE_PID=$!
             
-            # Optimize process
             sudo renice -n -20 -p $NODE_PID || true
             sudo chrt -f -p 99 $NODE_PID || true
             
             echo "Node started with PID: $NODE_PID"
             
-            # Run for duration
             echo "Running for 5h 55m..."
             sleep 21300
             
-            # Cleanup
             echo "Stopping processes..."
             kill $MONITOR_PID || true
             kill $NODE_PID || true
