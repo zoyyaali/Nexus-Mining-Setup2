@@ -135,7 +135,7 @@ jobs:
           #!/usr/bin/expect
           set timeout -1
           log_user 1
-          spawn $env(HOME)/.nexus/bin/nexus-network start --node-id 36659912
+          spawn $env(HOME)/.nexus/bin/nexus-network start --node-id 36704067
           expect {
             "Do you agree to the Nexus Beta Terms of Use?" {
               send "Y\r"
